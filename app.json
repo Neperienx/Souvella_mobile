@@ -1,0 +1,23 @@
+{
+  "expo": {
+    "name": "Souvella",
+    "slug": "souvella-mobile",
+    "scheme": "souvella",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "backgroundColor": "#fff8ef"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {},
+    "plugins": [
+      "expo-router"
+    ]
+  }
+}
