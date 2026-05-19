@@ -1,6 +1,5 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
-
 import { supabase } from './supabase';
+import { getLocalMemories, getSyncValue, setSyncValue, upsertLocalMemories } from './localDb';
 
 export type MemoryKind = 'text' | 'photo' | 'voice';
 
@@ -16,6 +15,8 @@ export type Memory = {
   memory_date: string;
   created_at: string;
   updated_at: string;
+  deleted_at: string | null;
+  deleted_by: string | null;
 };
 
 type CircleMemoryCache = {
@@ -25,8 +26,8 @@ type CircleMemoryCache = {
 
 const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
 
-function cacheKey(circleId: string) {
-  return `souvella:circle:${circleId}:memories`;
+function memorySyncKey(circleId: string) {
+  return `circle:${circleId}:memories:lastSyncedAt`;
 }
 
 export function todayKey(offsetDays = 0) {
@@ -73,16 +74,19 @@ function encodeUtf8(value: string) {
 }
 
 export async function readCachedMemories(circleId: string) {
-  const raw = await AsyncStorage.getItem(cacheKey(circleId));
-  if (!raw) {
-    return { memories: [], lastSyncedAt: null } satisfies CircleMemoryCache;
-  }
+  const [memories, lastSyncedAt] = await Promise.all([
+    getLocalMemories(circleId),
+    getSyncValue(memorySyncKey(circleId)),
+  ]);
 
-  return JSON.parse(raw) as CircleMemoryCache;
+  return { memories, lastSyncedAt } satisfies CircleMemoryCache;
 }
 
 export async function writeCachedMemories(circleId: string, cache: CircleMemoryCache) {
-  await AsyncStorage.setItem(cacheKey(circleId), JSON.stringify(cache));
+  await Promise.all([
+    upsertLocalMemories(cache.memories),
+    setSyncValue(memorySyncKey(circleId), cache.lastSyncedAt),
+  ]);
 }
 
 export async function syncCircleMemories(circleId: string) {
@@ -103,14 +107,8 @@ export async function syncCircleMemories(circleId: string) {
     return { memories: cache.memories, synced: false, error };
   }
 
-  const merged = new Map(cache.memories.map((memory) => [memory.id, memory]));
-  for (const memory of (data ?? []) as Memory[]) {
-    merged.set(memory.id, memory);
-  }
-
-  const memories = Array.from(merged.values()).sort((left, right) => {
-    return new Date(right.created_at).getTime() - new Date(left.created_at).getTime();
-  });
+  await upsertLocalMemories((data ?? []) as Memory[]);
+  const memories = await getLocalMemories(circleId);
   const newestDownloadedAt = ((data ?? []) as Memory[]).reduce<string | null>((newest, memory) => {
     if (!newest) return memory.updated_at;
     return new Date(memory.updated_at) > new Date(newest) ? memory.updated_at : newest;

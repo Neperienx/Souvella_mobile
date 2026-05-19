@@ -9,7 +9,7 @@ Souvella is a shared memory-circle app for families, friends, trips, and close g
 - **Supabase Auth** for email/password login and user sessions.
 - **Supabase Postgres** for circles, circle members, memories, comments, reactions, and base64 memory payloads.
 - **React Native Async Storage** to persist Supabase sessions on device.
-- **Async Storage memory cache** so each circle can keep a local copy and only download rows updated since the last sync.
+- **Expo SQLite** for the offline-first local cache of memories, media payloads, likes, comments, and circle member nicknames.
 - **Expo Image Picker, AV, and File System** for compressed photo selection, voice recording, and base64 file reads.
 - **TypeScript** for safer app code and data contracts.
 
@@ -21,6 +21,7 @@ This stack is a strong fit because React Native avoids writing separate Swift/Ko
    - Switch between Log in and Register.
    - Log in with email and password.
    - Register a new account with the same Supabase Auth backend.
+   - Users can manage their default profile and delete their account from the circles dashboard.
 
 2. **My circles dashboard**
    - Show all circles in a tile layout.
@@ -29,20 +30,26 @@ This stack is a strong fit because React Native avoids writing separate Swift/Ko
 
 3. **Create or join circle**
    - Creating a circle generates an invite code and links the circle to the current user through `circle_members`.
-   - Joining with an invite code links the existing circle to the current user through `circle_members`.
+   - Joining with an invite code creates a pending request that a circle owner/admin can approve.
 
 4. **Home / circle view**
    - Show an upload prompt until the current user has shared today's memory.
    - Enforce one memory per user per circle per day in the database.
    - Let each member set a nickname that is scoped to that circle.
+   - Let the circle owner/admin set the circle photo and manage members from the circle profile.
+   - Support owner/admin/member roles, member removal, and pending join request approval.
+   - Keep exactly one owner per non-empty circle, with automatic owner handoff if the owner leaves or deletes their account.
    - Include a debug next-day button on the circle screen to test daily resets and memory gems.
    - Sync missing or updated memories into local device storage for offline reading.
+   - Cache likes, comments, and circle nicknames locally so cached memories remain readable in flight mode.
    - Upload text, photo, or voice memories as base64 database payloads.
    - Show today's new memories and five random memory gems from the past.
 
 5. **Memory detail**
    - Display a selected memory.
-   - Support reactions, comments, and saving later.
+   - Support likes, comments, and saving later.
+   - Limit each member's daily likes per circle to the number of people in that circle.
+   - Let authors remove their own memories and let other circle members report memories for review.
 
 ## Getting Started
 
@@ -94,7 +101,9 @@ app/
   circle/[id].tsx      Circle home view
   memory/[id].tsx      Memory detail example
 src/
+  lib/localDb.ts       SQLite tables and local row-based cache helpers
   lib/memories.ts      Memory types, base64 helpers, and offline cache sync
+  lib/interactions.ts  Likes, comments, member names, and interaction sync
   lib/supabase.ts      Supabase client
   theme.ts             Shared colors, spacing, and typography
 ```
@@ -103,5 +112,15 @@ src/
 
 - Never commit `.env`; use `example.env` as the template.
 - The anon key is safe for client apps when Row Level Security policies are correctly configured.
+- Account deletion is implemented through `delete_current_user()` in `supabase/schema.sql`; rerun the schema after pulling database changes.
+- Memory removal uses `delete_memory()` in `supabase/schema.sql`. It marks the memory as deleted so other devices can remove it from their local SQLite cache during the next sync.
+- Draft legal documents live in `docs/legal/`. They are GDPR-aware product drafts, not legal advice, and need review before store submission.
 - The prototype stores memory payloads as base64 in Postgres. For large photos and long voice notes, keep compression aggressive or reconsider Supabase Storage later.
+- The circle view is offline-first: memories, base64 payloads, likes, comments, and member nicknames are cached in local SQLite after a successful sync. When online, the app downloads only memories changed since the last memory sync and only likes/comments created since the last interaction sync.
 - Add EAS Build when you are ready to distribute test builds for iOS and Android.
+
+## Backlog
+
+- Decide final account deletion behavior for memories authored by deleted users. Current observed behavior may leave prior memories visible as `Someone`; before production, choose and enforce either full deletion or anonymized retention.
+- Add an admin/moderation review screen for reported memories and extend reporting to comments.
+- Replace draft Terms and Privacy Policy with reviewed production legal text and real contact/controller details.

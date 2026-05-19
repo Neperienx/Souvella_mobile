@@ -23,3 +23,7 @@ export const radius = {
   md: 14,
   lg: 22,
 };
+
+export const fonts = {
+  handwriting: 'Caveat_700Bold',
+};

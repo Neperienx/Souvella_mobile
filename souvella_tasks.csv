@@ -1,0 +1,22 @@
+Task name,Category,Description,Owner,Phase,Priority,Status,Timeframe,Product
+Create privacy policy,Legal,"Explain collected data, storage, deletion, sharing, and user rights.",Both,Phase 1,High,Open,2-4h,Souvella
+Add terms of use,Legal,"Create terms covering user-generated content and platform rules.",Both,Phase 1,High,Open,1-2h,Souvella
+Implement abusive content reporting,Security,"Allow users to report abusive memories, comments, or uploads.",Both,Phase 1,High,Open,2-4h,Souvella
+Implement delete/block controls,Security,"Allow moderation or circle-owner content removal/blocking.",Both,Phase 1,High,Open,2-4h,Souvella
+Add account deletion feature,Auth,"Implement in-app account deletion flow for Apple compliance.",Both,Phase 1,Critical,Open,3-5h,Souvella
+Review photo permissions prompts,Mobile,"Ensure photo library permission prompts are clear and compliant.",Both,Phase 1,Medium,Open,30-60min,Souvella
+Review microphone permissions prompts,Mobile,"Ensure microphone permission prompts are clear and compliant.",Both,Phase 1,Medium,Open,30-60min,Souvella
+Validate App Store privacy declarations,Legal,"Ensure App Store and Play Store declarations match actual data usage.",Both,Phase 1,High,Open,1-2h,Souvella
+Test app for crashes,QA,"Run production-level testing to ensure app stability.",Both,Phase 2,High,Open,2-6h,Souvella
+Remove placeholder/debug buttons,Frontend,"Ensure no placeholder or debug UI exists in production builds.",Both,Phase 2,High,Open,30-60min,Souvella
+Hide debug next-day button,Frontend,"Ensure debug next-day button is hidden in release builds.",Both,Phase 2,High,Open,15-30min,Souvella
+Audit Supabase RLS policies,Backend,"Verify users only access memories from their own circles.",Both,Phase 2,Critical,Open,2-4h,Souvella
+Remove service-role keys from app,Backend,"Ensure no Supabase service-role keys are exposed client-side.",Both,Phase 2,Critical,Open,30-60min,Souvella
+Create app icon,Design,"Prepare production-ready app icon.",Both,Phase 3,Medium,Open,1-2h,Souvella
+Prepare store screenshots,Marketing,"Create App Store and Play Store screenshots.",Both,Phase 3,Medium,Open,2-4h,Souvella
+Write app store description,Marketing,"Prepare App Store and Play Store descriptions.",Both,Phase 3,Medium,Open,1-2h,Souvella
+Create support URL,Ops,"Prepare public support/contact page URL.",Both,Phase 3,Medium,Open,30-60min,Souvella
+Publish privacy policy URL,Legal,"Host privacy policy publicly for app store submission.",Both,Phase 3,High,Open,30-60min,Souvella
+Use EAS Build for production builds,DevOps,"Generate production builds using EAS Build.",Both,Phase 4,High,Open,30-60min,Souvella
+Test with TestFlight,QA,"Run iOS beta testing with TestFlight.",Both,Phase 4,High,Open,1-3d,Souvella
+Test with Google internal testing,QA,"Run Android beta testing through Google internal testing.",Both,Phase 4,High,Open,1-3d,Souvella
