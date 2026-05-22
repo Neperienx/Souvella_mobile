@@ -62,6 +62,18 @@ begin
 end;
 $$;
 
+insert into public.circle_members (circle_id, user_id, role)
+select circles.id, circles.created_by, 'owner'
+from public.circles
+where circles.created_by is not null
+  and not exists (
+    select 1
+    from public.circle_members
+    where circle_members.circle_id = circles.id
+      and circle_members.user_id = circles.created_by
+  )
+on conflict (circle_id, user_id) do nothing;
+
 update public.circle_members
 set role = 'owner'
 from public.circles
@@ -94,6 +106,22 @@ and not exists (
   where existing_owner.circle_id = circle_members.circle_id
     and existing_owner.role = 'owner'
 );
+
+with ranked_owners as (
+  select
+    ctid,
+    row_number() over (
+      partition by circle_id
+      order by joined_at asc, user_id asc
+    ) as owner_rank
+  from public.circle_members
+  where role = 'owner'
+)
+update public.circle_members
+set role = 'admin'
+from ranked_owners
+where circle_members.ctid = ranked_owners.ctid
+  and ranked_owners.owner_rank > 1;
 
 create unique index if not exists circle_members_one_owner
 on public.circle_members (circle_id)
@@ -160,6 +188,18 @@ alter table public.memories add column if not exists content_mime_type text;
 alter table public.memories add column if not exists updated_at timestamptz not null default now();
 alter table public.memories add column if not exists deleted_at timestamptz;
 alter table public.memories add column if not exists deleted_by uuid references auth.users(id) on delete set null;
+
+insert into public.circle_members (circle_id, user_id, role)
+select distinct memories.circle_id, memories.author_id, 'member'
+from public.memories
+where memories.deleted_at is null
+  and not exists (
+    select 1
+    from public.circle_members
+    where circle_members.circle_id = memories.circle_id
+      and circle_members.user_id = memories.author_id
+  )
+on conflict (circle_id, user_id) do nothing;
 
 do $$
 begin

@@ -83,10 +83,8 @@ export async function readCachedMemories(circleId: string) {
 }
 
 export async function writeCachedMemories(circleId: string, cache: CircleMemoryCache) {
-  await Promise.all([
-    upsertLocalMemories(cache.memories),
-    setSyncValue(memorySyncKey(circleId), cache.lastSyncedAt),
-  ]);
+  await upsertLocalMemories(cache.memories);
+  await setSyncValue(memorySyncKey(circleId), cache.lastSyncedAt);
 }
 
 export async function syncCircleMemories(circleId: string) {
@@ -107,17 +105,15 @@ export async function syncCircleMemories(circleId: string) {
     return { memories: cache.memories, synced: false, error };
   }
 
-  await upsertLocalMemories((data ?? []) as Memory[]);
+  const downloadedMemories = (data ?? []) as Memory[];
+  await upsertLocalMemories(downloadedMemories);
   const memories = await getLocalMemories(circleId);
-  const newestDownloadedAt = ((data ?? []) as Memory[]).reduce<string | null>((newest, memory) => {
+  const newestDownloadedAt = downloadedMemories.reduce<string | null>((newest, memory) => {
     if (!newest) return memory.updated_at;
     return new Date(memory.updated_at) > new Date(newest) ? memory.updated_at : newest;
   }, null);
 
-  await writeCachedMemories(circleId, {
-    memories,
-    lastSyncedAt: newestDownloadedAt ?? cache.lastSyncedAt,
-  });
+  await setSyncValue(memorySyncKey(circleId), newestDownloadedAt ?? cache.lastSyncedAt);
 
   return { memories, synced: true, error: null };
 }

@@ -125,13 +125,11 @@ export async function loadCircleInteractions(circleId: string, currentDate: stri
   const lastLikesSyncedAt = newestCreatedAt((likesResult.data ?? []) as LocalMemoryLike[]) ?? cached?.lastLikesSyncedAt ?? null;
   const lastCommentsSyncedAt = newestCreatedAt((commentsResult.data ?? []) as MemoryComment[]) ?? cached?.lastCommentsSyncedAt ?? null;
 
-  await Promise.all([
-    upsertLocalLikes((likesResult.data ?? []) as LocalMemoryLike[]),
-    upsertLocalComments((commentsResult.data ?? []) as MemoryComment[]),
-    upsertLocalMemberNames(circleId, memberNames),
-    setSyncValue(likesSyncKey(circleId), lastLikesSyncedAt),
-    setSyncValue(commentsSyncKey(circleId), lastCommentsSyncedAt),
-  ]);
+  await upsertLocalLikes((likesResult.data ?? []) as LocalMemoryLike[]);
+  await upsertLocalComments((commentsResult.data ?? []) as MemoryComment[]);
+  await upsertLocalMemberNames(circleId, memberNames);
+  await setSyncValue(likesSyncKey(circleId), lastLikesSyncedAt);
+  await setSyncValue(commentsSyncKey(circleId), lastCommentsSyncedAt);
 
   return {
     interactions,

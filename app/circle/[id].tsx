@@ -42,7 +42,8 @@ type JoinRequest = {
 };
 
 export default function CircleHomeScreen() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const { id: idParam } = useLocalSearchParams<{ id: string | string[] }>();
+  const circleId = Array.isArray(idParam) ? idParam[0] : idParam;
   const [circle, setCircle] = useState<Circle | null>(null);
   const [memories, setMemories] = useState<Memory[]>([]);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
@@ -79,20 +80,20 @@ export default function CircleHomeScreen() {
   const canManageCircle = myRole === 'owner' || myRole === 'admin';
 
   const refreshMemories = useCallback(async () => {
-    if (!id) return;
+    if (!circleId) return;
 
     setSyncing(true);
-    const result = await syncCircleMemories(id);
+    const result = await syncCircleMemories(circleId);
     setMemories(result.memories);
     setSyncMessage(result.synced ? 'Up to date for offline reading' : 'Offline cache shown');
     setSyncing(false);
-  }, [id]);
+  }, [circleId]);
 
   const refreshInteractions = useCallback(async (userIdOverride?: string | null) => {
-    if (!id) return;
+    if (!circleId) return;
 
     setSyncing(true);
-    const result = await loadCircleInteractions(id, currentDate, userIdOverride ?? currentUserId);
+    const result = await loadCircleInteractions(circleId, currentDate, userIdOverride ?? currentUserId);
     if (result.error) {
       setSyncMessage('Offline cache shown');
     }
@@ -101,13 +102,13 @@ export default function CircleHomeScreen() {
     setLikeState(result.likeState);
     setMemberNames((current) => ({ ...current, ...result.memberNames }));
     setSyncing(false);
-  }, [id, currentDate, currentUserId]);
+  }, [circleId, currentDate, currentUserId]);
 
   const refreshCircleProfile = useCallback(async (userIdOverride?: string | null) => {
-    if (!id) return;
+    if (!circleId) return;
 
     const { data: membersData, error: membersError } = await supabase
-      .rpc('get_circle_members', { circle_id_input: id });
+      .rpc('get_circle_members', { circle_id_input: circleId });
 
     if (membersError) {
       Alert.alert('Could not load members', membersError.message);
@@ -141,7 +142,7 @@ export default function CircleHomeScreen() {
     }
 
     const { data: requestsData, error: requestsError } = await supabase
-      .rpc('get_circle_join_requests', { circle_id_input: id });
+      .rpc('get_circle_join_requests', { circle_id_input: circleId });
 
     if (requestsError) {
       Alert.alert('Could not load join requests', requestsError.message);
@@ -149,7 +150,7 @@ export default function CircleHomeScreen() {
     }
 
     setJoinRequests((requestsData ?? []) as JoinRequest[]);
-  }, [id, currentUserId]);
+  }, [circleId, currentUserId]);
 
   useEffect(() => {
     if (!syncing) {
@@ -173,15 +174,24 @@ export default function CircleHomeScreen() {
 
   useEffect(() => {
     async function loadCircle() {
+      if (!circleId) {
+        Alert.alert('Could not open circle', 'Missing circle id.');
+        router.back();
+        return;
+      }
+
       const [{ data: userData }, circleResult] = await Promise.all([
         supabase.auth.getUser(),
-        supabase.from('circles').select('*').eq('id', id).single(),
+        supabase.from('circles').select('*').eq('id', circleId).maybeSingle(),
       ]);
 
       setCurrentUserId(userData.user?.id ?? null);
 
-      if (circleResult.error) {
-        Alert.alert('Could not open circle', circleResult.error.message);
+      if (circleResult.error || !circleResult.data) {
+        Alert.alert(
+          'Could not open circle',
+          circleResult.error?.message ?? 'This account is not currently a member of this circle.',
+        );
         return;
       }
 
@@ -194,9 +204,9 @@ export default function CircleHomeScreen() {
         const { data: membership } = await supabase
           .from('circle_members')
           .select('nickname,role')
-          .eq('circle_id', id)
+          .eq('circle_id', circleId)
           .eq('user_id', userData.user.id)
-          .single();
+          .maybeSingle();
 
         setNickname(membership?.nickname ?? null);
         setNicknameDraft(membership?.nickname ?? '');
@@ -210,7 +220,7 @@ export default function CircleHomeScreen() {
     }
 
     loadCircle();
-  }, [id, refreshCircleProfile, refreshInteractions, refreshMemories]);
+  }, [circleId, refreshCircleProfile, refreshInteractions, refreshMemories]);
 
   useEffect(() => {
     if (interactionSyncReady.current) {
@@ -293,7 +303,7 @@ export default function CircleHomeScreen() {
     setLoading(true);
     const { data, error } = await supabase
       .rpc('upload_daily_memory', {
-        circle_id_input: id,
+        circle_id_input: circleId,
         kind_input: kind,
         title_input: note ? note.slice(0, 42) : defaultTitle(kind),
         note_input: note,
@@ -321,7 +331,7 @@ export default function CircleHomeScreen() {
   async function saveNickname() {
     const { data, error } = await supabase
       .rpc('update_circle_nickname', {
-        circle_id_input: id,
+        circle_id_input: circleId,
         nickname_input: nicknameDraft,
       })
       .single();
@@ -369,7 +379,7 @@ export default function CircleHomeScreen() {
 
     const { data, error } = await supabase
       .rpc('update_circle_profile', {
-        circle_id_input: id,
+        circle_id_input: circleId,
         name_input: circleNameDraft.trim(),
         avatar_base64_input: circleAvatarBase64,
         avatar_mime_type_input: circleAvatarMimeType,
@@ -409,7 +419,7 @@ export default function CircleHomeScreen() {
 
   async function changeMemberRole(member: CircleMember, role: 'admin' | 'member') {
     const { error } = await supabase.rpc('update_circle_member_role', {
-      circle_id_input: id,
+      circle_id_input: circleId,
       member_id_input: member.user_id,
       role_input: role,
     });
@@ -432,7 +442,7 @@ export default function CircleHomeScreen() {
 
   async function removeMember(member: CircleMember) {
     const { error } = await supabase.rpc('remove_circle_member', {
-      circle_id_input: id,
+      circle_id_input: circleId,
       member_id_input: member.user_id,
     });
 
