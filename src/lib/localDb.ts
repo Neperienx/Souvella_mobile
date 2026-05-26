@@ -42,7 +42,8 @@ export async function initLocalDb() {
       CREATE TABLE IF NOT EXISTS memories (
         id TEXT PRIMARY KEY NOT NULL,
         circle_id TEXT NOT NULL,
-        author_id TEXT NOT NULL,
+        author_id TEXT,
+        author_name_snapshot TEXT,
         kind TEXT NOT NULL,
         title TEXT NOT NULL,
         note TEXT,
@@ -95,6 +96,7 @@ export async function initLocalDb() {
 
     await addColumnIfMissing(db, 'memories', 'deleted_at', 'TEXT');
     await addColumnIfMissing(db, 'memories', 'deleted_by', 'TEXT');
+    await addColumnIfMissing(db, 'memories', 'author_name_snapshot', 'TEXT');
   })();
 
   return initPromise;
@@ -153,13 +155,14 @@ export async function upsertLocalMemories(memories: Memory[]) {
       await db.runAsync(
         `
           INSERT INTO memories (
-            id, circle_id, author_id, kind, title, note, content_base64,
+            id, circle_id, author_id, author_name_snapshot, kind, title, note, content_base64,
             content_mime_type, memory_date, created_at, updated_at, deleted_at, deleted_by
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET
             circle_id = excluded.circle_id,
             author_id = excluded.author_id,
+            author_name_snapshot = excluded.author_name_snapshot,
             kind = excluded.kind,
             title = excluded.title,
             note = excluded.note,
@@ -173,7 +176,8 @@ export async function upsertLocalMemories(memories: Memory[]) {
         `,
         memory.id,
         memory.circle_id,
-        memory.author_id,
+        memory.author_id ?? '',
+        memory.author_name_snapshot,
         memory.kind,
         memory.title,
         memory.note,

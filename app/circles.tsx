@@ -10,6 +10,13 @@ type CircleRow = Circle & {
   circle_members?: { joined_at: string }[];
 };
 
+type PendingJoinRequest = {
+  id: string;
+  circle_id: string;
+  circle_name: string;
+  created_at: string;
+};
+
 type ModalMode = 'choice' | 'create' | 'join' | null;
 
 type Profile = {
@@ -20,6 +27,7 @@ type Profile = {
 
 export default function CirclesScreen() {
   const [circles, setCircles] = useState<CircleRow[]>([]);
+  const [pendingRequests, setPendingRequests] = useState<PendingJoinRequest[]>([]);
   const [circleName, setCircleName] = useState('');
   const [inviteCode, setInviteCode] = useState('');
   const [loading, setLoading] = useState(false);
@@ -53,6 +61,23 @@ export default function CirclesScreen() {
     setCircles(data ?? []);
   }, []);
 
+  const loadPendingRequests = useCallback(async () => {
+    const { data: userData } = await supabase.auth.getUser();
+    if (!userData.user) {
+      router.replace('/auth');
+      return;
+    }
+
+    const { data, error } = await supabase.rpc('get_my_pending_join_requests');
+
+    if (error) {
+      Alert.alert('Could not load pending requests', error.message);
+      return;
+    }
+
+    setPendingRequests((data ?? []) as PendingJoinRequest[]);
+  }, []);
+
   const loadProfile = useCallback(async () => {
     const { data: userData } = await supabase.auth.getUser();
     if (!userData.user) {
@@ -81,8 +106,9 @@ export default function CirclesScreen() {
 
   useEffect(() => {
     loadCircles();
+    loadPendingRequests();
     loadProfile();
-  }, [loadCircles, loadProfile]);
+  }, [loadCircles, loadPendingRequests, loadProfile]);
 
   function closeModal() {
     setModalMode(null);
@@ -134,9 +160,15 @@ export default function CirclesScreen() {
       .rpc('request_join_memory_circle', { invite_code_input: inviteCode.trim().toUpperCase() })
       .single();
 
-    if (!userData.user || circleError || !requestData) {
+    if (!userData.user) {
       setLoading(false);
-      Alert.alert('Invite not found', circleError?.message ?? 'Try another code.');
+      router.replace('/auth');
+      return;
+    }
+
+    if (circleError || !requestData) {
+      setLoading(false);
+      Alert.alert(circleError ? 'Could not join circle' : 'Invite not found', circleError?.message ?? 'Try another code.');
       return;
     }
 
@@ -146,10 +178,12 @@ export default function CirclesScreen() {
 
     if (joinRequest.status === 'already_member') {
       await loadCircles();
+      await loadPendingRequests();
       router.push(`/circle/${joinRequest.circle_id}`);
       return;
     }
 
+    await loadPendingRequests();
     Alert.alert('Request sent', `An admin of ${joinRequest.circle_name} can now approve your request.`);
   }
 
@@ -265,7 +299,17 @@ export default function CirclesScreen() {
           </Pressable>
         ))}
 
-        {circles.length === 0 && (
+        {pendingRequests.map((request) => (
+          <View key={request.id} style={[styles.tile, styles.pendingTile]}>
+            <View style={styles.pendingIconWrap}>
+              <Text style={styles.pendingIcon}>...</Text>
+            </View>
+            <Text numberOfLines={2} style={styles.circleName}>{request.circle_name}</Text>
+            <Text style={styles.pendingMeta}>Pending approval</Text>
+          </View>
+        ))}
+
+        {circles.length === 0 && pendingRequests.length === 0 && (
           <Text style={styles.emptyText}>Create your first memory circle or join one with an invite code.</Text>
         )}
       </ScrollView>
@@ -478,6 +522,32 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: spacing.xs,
     backgroundColor: '#fff1f3',
+  },
+  pendingTile: {
+    borderStyle: 'dashed',
+    borderColor: colors.lilac,
+    backgroundColor: colors.paperDeep,
+    opacity: 0.92,
+  },
+  pendingIconWrap: {
+    width: 76,
+    height: 76,
+    borderRadius: 38,
+    alignSelf: 'center',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.lilac,
+  },
+  pendingIcon: {
+    color: colors.ink,
+    fontSize: 24,
+    fontWeight: '700',
+    letterSpacing: 1,
+  },
+  pendingMeta: {
+    color: colors.rose,
+    fontSize: 12,
+    fontWeight: '700',
   },
   plus: {
     color: colors.ink,

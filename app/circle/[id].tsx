@@ -41,6 +41,26 @@ type JoinRequest = {
   created_at: string;
 };
 
+type ReportedMemory = {
+  report_id: string;
+  memory_id: string;
+  reporter_id: string | null;
+  reporter_name: string;
+  reason: string | null;
+  reported_at: string;
+  author_id: string | null;
+  author_name: string;
+  kind: MemoryKind;
+  title: string;
+  note: string | null;
+  content_base64: string | null;
+  content_mime_type: string | null;
+  memory_date: string;
+  created_at: string;
+};
+
+type ProfileTab = 'details' | 'requests' | 'reports';
+
 export default function CircleHomeScreen() {
   const { id: idParam } = useLocalSearchParams<{ id: string | string[] }>();
   const circleId = Array.isArray(idParam) ? idParam[0] : idParam;
@@ -61,7 +81,11 @@ export default function CircleHomeScreen() {
   const [myRole, setMyRole] = useState<CircleRole>('member');
   const [members, setMembers] = useState<CircleMember[]>([]);
   const [joinRequests, setJoinRequests] = useState<JoinRequest[]>([]);
+  const [reportedMemories, setReportedMemories] = useState<ReportedMemory[]>([]);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [profileTab, setProfileTab] = useState<ProfileTab>('details');
+  const [deleteCircleOpen, setDeleteCircleOpen] = useState(false);
+  const [deleteCircleConfirm, setDeleteCircleConfirm] = useState('');
   const [debugDayOffset, setDebugDayOffset] = useState(0);
   const [interactions, setInteractions] = useState<Record<string, MemoryInteraction>>({});
   const [likeState, setLikeState] = useState<LikeState>({ likesLimit: 0, likesUsed: 0 });
@@ -78,6 +102,9 @@ export default function CircleHomeScreen() {
   const hasUploadedToday = todayMemories.some((memory) => memory.author_id === currentUserId);
   const memberCount = Object.keys(memberNames).length;
   const canManageCircle = myRole === 'owner' || myRole === 'admin';
+  const hasJoinRequests = canManageCircle && joinRequests.length > 0;
+  const hasReports = canManageCircle && reportedMemories.length > 0;
+  const hasProfileNotifications = hasJoinRequests || hasReports;
 
   const refreshMemories = useCallback(async () => {
     if (!circleId) return;
@@ -138,18 +165,27 @@ export default function CircleHomeScreen() {
     const canLoadRequests = me?.role === 'owner' || me?.role === 'admin';
     if (!canLoadRequests) {
       setJoinRequests([]);
+      setReportedMemories([]);
       return;
     }
 
-    const { data: requestsData, error: requestsError } = await supabase
-      .rpc('get_circle_join_requests', { circle_id_input: circleId });
+    const [requestsResult, reportsResult] = await Promise.all([
+      supabase.rpc('get_circle_join_requests', { circle_id_input: circleId }),
+      supabase.rpc('get_circle_memory_reports', { circle_id_input: circleId }),
+    ]);
 
-    if (requestsError) {
-      Alert.alert('Could not load join requests', requestsError.message);
+    if (requestsResult.error) {
+      Alert.alert('Could not load join requests', requestsResult.error.message);
       return;
     }
 
-    setJoinRequests((requestsData ?? []) as JoinRequest[]);
+    if (reportsResult.error) {
+      Alert.alert('Could not load reports', reportsResult.error.message);
+      return;
+    }
+
+    setJoinRequests((requestsResult.data ?? []) as JoinRequest[]);
+    setReportedMemories((reportsResult.data ?? []) as ReportedMemory[]);
   }, [circleId, currentUserId]);
 
   useEffect(() => {
@@ -417,6 +453,38 @@ export default function CircleHomeScreen() {
     await refreshCircleProfile();
   }
 
+  async function resolveReport(report: ReportedMemory, resolution: 'kept' | 'removed') {
+    const { error } = await supabase.rpc('resolve_memory_report', {
+      report_id_input: report.report_id,
+      resolution_input: resolution,
+    });
+
+    if (error) {
+      Alert.alert('Could not resolve report', error.message);
+      return;
+    }
+
+    await refreshCircleProfile();
+    if (resolution === 'removed') {
+      await refreshMemories();
+    }
+  }
+
+  function confirmResolveReport(report: ReportedMemory, resolution: 'kept' | 'removed') {
+    if (resolution === 'kept') {
+      Alert.alert('Keep this memory?', 'The report will be marked handled and the memory will stay visible in the circle.', [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Keep Memory', onPress: () => resolveReport(report, 'kept') },
+      ]);
+      return;
+    }
+
+    Alert.alert('Remove this memory?', 'The memory will be removed from the circle and this report will be marked handled.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Remove Memory', style: 'destructive', onPress: () => resolveReport(report, 'removed') },
+    ]);
+  }
+
   async function changeMemberRole(member: CircleMember, role: 'admin' | 'member') {
     const { error } = await supabase.rpc('update_circle_member_role', {
       circle_id_input: circleId,
@@ -453,6 +521,126 @@ export default function CircleHomeScreen() {
 
     await refreshCircleProfile();
     await refreshInteractions();
+  }
+
+  function confirmLeaveCircle() {
+    if (!circleId || !circle) return;
+
+    if (myRole === 'owner') {
+      const otherMembers = members.filter((member) => member.user_id !== currentUserId);
+      if (otherMembers.length === 0) {
+        Alert.alert(
+          'Delete this circle?',
+          'You are the only member left. Delete the circle to remove it permanently.',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'Delete Circle', style: 'destructive', onPress: () => setDeleteCircleOpen(true) },
+          ],
+        );
+        return;
+      }
+
+      Alert.alert(
+        'Choose a new owner',
+        'Ownership must be transferred before you leave this circle.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          ...otherMembers.map((member) => ({
+            text: member.nickname || member.default_username || 'Someone',
+            onPress: () => confirmOwnerLeave(member),
+          })),
+        ],
+      );
+      return;
+    }
+
+    confirmLeaveMemoryChoice();
+  }
+
+  function confirmOwnerLeave(newOwner: CircleMember) {
+    const displayName = newOwner.nickname || newOwner.default_username || 'this member';
+    Alert.alert(
+      'Transfer and leave?',
+      `${displayName} will become the new owner. Choose what happens to your memories.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Leave Memories', onPress: () => transferOwnershipAndLeave(newOwner.user_id, false) },
+        { text: 'Delete My Memories', style: 'destructive', onPress: () => transferOwnershipAndLeave(newOwner.user_id, true) },
+      ],
+    );
+  }
+
+  function confirmLeaveMemoryChoice() {
+    Alert.alert(
+      'Leave this circle?',
+      'You can keep your memories in the circle history, or delete your memories before leaving.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Leave Memories', onPress: () => leaveCircle(false) },
+        { text: 'Delete My Memories', style: 'destructive', onPress: () => leaveCircle(true) },
+      ],
+    );
+  }
+
+  async function transferOwnershipAndLeave(newOwnerId: string, deleteMemories: boolean) {
+    if (!circleId) return;
+
+    setLoading(true);
+    const { error: transferError } = await supabase.rpc('transfer_circle_ownership', {
+      circle_id_input: circleId,
+      new_owner_id_input: newOwnerId,
+    });
+
+    if (transferError) {
+      setLoading(false);
+      Alert.alert('Could not transfer ownership', transferError.message);
+      return;
+    }
+
+    await leaveCircle(deleteMemories, false);
+  }
+
+  async function leaveCircle(deleteMemories: boolean, manageLoading = true) {
+    if (!circleId) return;
+
+    if (manageLoading) {
+      setLoading(true);
+    }
+
+    const { error } = await supabase.rpc('leave_circle', {
+      circle_id_input: circleId,
+      delete_memories_input: deleteMemories,
+    });
+
+    setLoading(false);
+
+    if (error) {
+      Alert.alert('Could not leave circle', error.message);
+      return;
+    }
+
+    setProfileOpen(false);
+    router.replace('/circles');
+  }
+
+  async function deleteCircle() {
+    if (!circleId || !circle) return;
+
+    setLoading(true);
+    const { error } = await supabase.rpc('delete_circle', {
+      circle_id_input: circleId,
+      confirm_name_input: deleteCircleConfirm,
+    });
+    setLoading(false);
+
+    if (error) {
+      Alert.alert('Could not delete circle', error.message);
+      return;
+    }
+
+    setDeleteCircleOpen(false);
+    setProfileOpen(false);
+    router.replace('/circles');
   }
 
   function skipToNextDay() {
@@ -495,6 +683,11 @@ export default function CircleHomeScreen() {
             <Image source={{ uri: `data:${circle.avatar_mime_type ?? 'image/jpeg'};base64,${circle.avatar_base64}` }} style={styles.profileImage} />
           ) : (
             <Text style={styles.profileIcon}>{circle?.name.slice(0, 1).toUpperCase() ?? 'P'}</Text>
+          )}
+          {hasProfileNotifications && (
+            <View style={styles.requestBadge}>
+              <Text style={styles.requestBadgeText}>{joinRequests.length + reportedMemories.length}</Text>
+            </View>
           )}
         </Pressable>
       </View>
@@ -608,7 +801,7 @@ export default function CircleHomeScreen() {
           <MemoryCard
             key={memory.id}
             memory={memory}
-            authorName={memberNames[memory.author_id] ?? 'Someone'}
+            authorName={authorDisplayName(memory, memberNames)}
             index={index}
             currentDate={currentDate}
             interaction={interactions[memory.id]}
@@ -632,7 +825,7 @@ export default function CircleHomeScreen() {
             compact
             index={index}
             memory={memory}
-            authorName={memberNames[memory.author_id] ?? 'Someone'}
+            authorName={authorDisplayName(memory, memberNames)}
             currentDate={currentDate}
             interaction={interactions[memory.id]}
             likeDisabled={likeState.likesLimit > 0 && likeState.likesUsed >= likeState.likesLimit && !interactions[memory.id]?.likedByMe}
@@ -671,6 +864,24 @@ export default function CircleHomeScreen() {
               </View>
 
               {canManageCircle && (
+                <View style={styles.tabRow}>
+                  <ProfileTabButton active={profileTab === 'details'} label="Details" onPress={() => setProfileTab('details')} />
+                  <ProfileTabButton
+                    active={profileTab === 'requests'}
+                    count={joinRequests.length}
+                    label="Requests"
+                    onPress={() => setProfileTab('requests')}
+                  />
+                  <ProfileTabButton
+                    active={profileTab === 'reports'}
+                    count={reportedMemories.length}
+                    label="Reports"
+                    onPress={() => setProfileTab('reports')}
+                  />
+                </View>
+              )}
+
+              {profileTab === 'details' && canManageCircle && (
                 <View style={styles.profileSection}>
                   <Text style={styles.profileSectionTitle}>Circle</Text>
                   <TextInput
@@ -689,6 +900,7 @@ export default function CircleHomeScreen() {
                 </View>
               )}
 
+              {profileTab === 'details' && (
               <View style={styles.profileSection}>
                 <Text style={styles.profileSectionTitle}>Your nickname</Text>
                 <TextInput
@@ -702,7 +914,9 @@ export default function CircleHomeScreen() {
                   <Text style={styles.saveButtonText}>Save Nickname</Text>
                 </Pressable>
               </View>
+              )}
 
+              {profileTab === 'details' && (
               <View style={styles.profileSection}>
                 <Text style={styles.profileSectionTitle}>Invite code</Text>
                 <View style={styles.inviteBox}>
@@ -710,10 +924,19 @@ export default function CircleHomeScreen() {
                   <Text style={styles.inviteHint}>New people now send a request before joining.</Text>
                 </View>
               </View>
+              )}
 
-              {canManageCircle && joinRequests.length > 0 && (
+              {canManageCircle && profileTab === 'requests' && (
                 <View style={styles.profileSection}>
-                  <Text style={styles.profileSectionTitle}>Join requests</Text>
+                  <View style={styles.profileSectionTitleRow}>
+                    <Text style={styles.profileSectionTitle}>Join requests</Text>
+                    {joinRequests.length > 0 && <View style={styles.inlineRequestBadge}>
+                      <Text style={styles.inlineRequestBadgeText}>{joinRequests.length}</Text>
+                    </View>}
+                  </View>
+                  {joinRequests.length === 0 && (
+                    <Text style={styles.emptyProfileText}>No pending join requests.</Text>
+                  )}
                   {joinRequests.map((request) => (
                     <View key={request.id} style={styles.memberRow}>
                       <MemberAvatar
@@ -736,6 +959,29 @@ export default function CircleHomeScreen() {
                 </View>
               )}
 
+              {canManageCircle && profileTab === 'reports' && (
+                <View style={styles.profileSection}>
+                  <View style={styles.profileSectionTitleRow}>
+                    <Text style={styles.profileSectionTitle}>Reports</Text>
+                    {reportedMemories.length > 0 && <View style={styles.inlineRequestBadge}>
+                      <Text style={styles.inlineRequestBadgeText}>{reportedMemories.length}</Text>
+                    </View>}
+                  </View>
+                  {reportedMemories.length === 0 && (
+                    <Text style={styles.emptyProfileText}>No reported memories need review.</Text>
+                  )}
+                  {reportedMemories.map((report) => (
+                    <ReportedMemoryCard
+                      key={report.report_id}
+                      report={report}
+                      onKeep={() => confirmResolveReport(report, 'kept')}
+                      onRemove={() => confirmResolveReport(report, 'removed')}
+                    />
+                  ))}
+                </View>
+              )}
+
+              {profileTab === 'details' && (
               <View style={styles.profileSection}>
                 <Text style={styles.profileSectionTitle}>Members</Text>
                 {members.map((member) => {
@@ -771,7 +1017,48 @@ export default function CircleHomeScreen() {
                   );
                 })}
               </View>
+              )}
+
+              {profileTab === 'details' && (
+              <View style={styles.profileSection}>
+                <Text style={styles.profileSectionTitle}>Circle access</Text>
+                <Pressable disabled={loading} onPress={confirmLeaveCircle} style={styles.leaveCircleButton}>
+                  <Text style={styles.leaveCircleText}>{loading ? 'Working...' : 'Leave Circle'}</Text>
+                </Pressable>
+                {myRole === 'owner' && (
+                  <Pressable disabled={loading} onPress={() => setDeleteCircleOpen(true)} style={styles.deleteCircleButton}>
+                    <Text style={styles.deleteCircleText}>Delete Circle for Everyone</Text>
+                  </Pressable>
+                )}
+              </View>
+              )}
             </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal animationType="fade" transparent visible={deleteCircleOpen} onRequestClose={() => setDeleteCircleOpen(false)}>
+        <View style={styles.modalShade}>
+          <View style={styles.profileCard}>
+            <View style={styles.profileHeader}>
+              <Text style={styles.profileTitle}>Delete circle?</Text>
+              <Pressable onPress={() => setDeleteCircleOpen(false)}>
+                <Text style={styles.closeButton}>x</Text>
+              </Pressable>
+            </View>
+            <Text style={styles.dangerCopy}>
+              This permanently deletes {circle?.name ?? 'this circle'} for every member, including all memories, comments, likes, and join requests.
+            </Text>
+            <TextInput
+              onChangeText={setDeleteCircleConfirm}
+              placeholder="Type the circle name"
+              placeholderTextColor={colors.muted}
+              style={styles.nicknameInput}
+              value={deleteCircleConfirm}
+            />
+            <Pressable disabled={loading} onPress={deleteCircle} style={styles.deleteCircleButton}>
+              <Text style={styles.deleteCircleText}>{loading ? 'Deleting...' : 'Permanently Delete Circle'}</Text>
+            </Pressable>
           </View>
         </View>
       </Modal>
@@ -783,6 +1070,66 @@ function defaultTitle(kind: MemoryKind) {
   if (kind === 'photo') return 'Photo memory';
   if (kind === 'voice') return 'Voice note';
   return "Today's memory";
+}
+
+function authorDisplayName(memory: Memory, memberNames: Record<string, string>) {
+  if (memory.author_id && memberNames[memory.author_id]) {
+    return memberNames[memory.author_id];
+  }
+
+  return memory.author_name_snapshot ?? 'Someone';
+}
+
+function ProfileTabButton(props: { active: boolean; count?: number; label: string; onPress: () => void }) {
+  return (
+    <Pressable onPress={props.onPress} style={[styles.tabButton, props.active && styles.activeTabButton]}>
+      <Text style={[styles.tabButtonText, props.active && styles.activeTabButtonText]}>{props.label}</Text>
+      {!!props.count && (
+        <View style={styles.tabCount}>
+          <Text style={styles.tabCountText}>{props.count}</Text>
+        </View>
+      )}
+    </Pressable>
+  );
+}
+
+function ReportedMemoryCard(props: { report: ReportedMemory; onKeep: () => void; onRemove: () => void }) {
+  const report = props.report;
+  const isPhoto = report.kind === 'photo' && !!report.content_base64;
+
+  return (
+    <View style={styles.reportCard}>
+      <View style={styles.reportMetaRow}>
+        <Text numberOfLines={1} style={styles.reportTitle}>{report.title}</Text>
+        <Text style={styles.reportKind}>{report.kind}</Text>
+      </View>
+      <Text style={styles.reportSubtext}>By {report.author_name} - {formatMemoryDate(report.memory_date, todayKey())}</Text>
+      <View style={styles.reportPreview}>
+        {isPhoto ? (
+          <Image
+            source={{ uri: `data:${report.content_mime_type ?? 'image/jpeg'};base64,${report.content_base64}` }}
+            style={styles.reportImage}
+          />
+        ) : (
+          <Text numberOfLines={4} style={styles.reportPreviewText}>
+            {report.kind === 'voice' ? 'Voice memory' : report.note || report.title}
+          </Text>
+        )}
+      </View>
+      <View style={styles.reportReasonBox}>
+        <Text style={styles.reportReasonLabel}>Reported by {report.reporter_name}</Text>
+        <Text style={styles.reportReason}>{report.reason ?? 'No reason provided'}</Text>
+      </View>
+      <View style={styles.reportActionRow}>
+        <Pressable onPress={props.onKeep} style={styles.keepMemoryButton}>
+          <Text style={styles.keepMemoryText}>Keep Memory</Text>
+        </Pressable>
+        <Pressable onPress={props.onRemove} style={styles.removeMemoryButton}>
+          <Text style={styles.removeMemoryText}>Remove Memory</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
 }
 
 function KindButton(props: { active: boolean; label: string; symbol: string; onPress: () => void }) {
@@ -962,6 +1309,25 @@ const styles = StyleSheet.create({
     backgroundColor: colors.white,
     borderWidth: 1,
     borderColor: colors.line,
+  },
+  requestBadge: {
+    position: 'absolute',
+    right: -3,
+    top: -4,
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.rose,
+    borderWidth: 1,
+    borderColor: colors.white,
+  },
+  requestBadgeText: {
+    color: colors.white,
+    fontSize: 10,
+    fontWeight: '800',
+    lineHeight: 12,
   },
   profileIcon: {
     color: colors.ink,
@@ -1490,9 +1856,205 @@ const styles = StyleSheet.create({
   profileSection: {
     gap: spacing.sm,
   },
+  tabRow: {
+    flexDirection: 'row',
+    gap: spacing.xs,
+  },
+  tabButton: {
+    flex: 1,
+    minHeight: 38,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: colors.white,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+    gap: spacing.xs,
+  },
+  activeTabButton: {
+    borderColor: colors.rose,
+    backgroundColor: colors.roseSoft,
+  },
+  tabButtonText: {
+    color: colors.ink,
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  activeTabButtonText: {
+    color: colors.white,
+  },
+  tabCount: {
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.rose,
+    paddingHorizontal: 4,
+  },
+  tabCountText: {
+    color: colors.white,
+    fontSize: 10,
+    fontWeight: '800',
+  },
   profileSectionTitle: {
     color: colors.ink,
     fontSize: 18,
+    fontWeight: '800',
+  },
+  profileSectionTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  inlineRequestBadge: {
+    minWidth: 24,
+    height: 24,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.rose,
+    paddingHorizontal: spacing.xs,
+  },
+  inlineRequestBadgeText: {
+    color: colors.white,
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  leaveCircleButton: {
+    minHeight: 48,
+    borderRadius: radius.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.white,
+    borderWidth: 1,
+    borderColor: colors.line,
+  },
+  leaveCircleText: {
+    color: colors.ink,
+    fontWeight: '800',
+  },
+  deleteCircleButton: {
+    minHeight: 48,
+    borderRadius: radius.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#bd2f45',
+    paddingHorizontal: spacing.md,
+  },
+  deleteCircleText: {
+    color: colors.white,
+    fontWeight: '800',
+    textAlign: 'center',
+  },
+  dangerCopy: {
+    color: colors.ink,
+    fontSize: 15,
+    lineHeight: 21,
+  },
+  emptyProfileText: {
+    color: colors.muted,
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  reportCard: {
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: colors.white,
+    padding: spacing.md,
+    gap: spacing.sm,
+  },
+  reportMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.sm,
+  },
+  reportTitle: {
+    flex: 1,
+    color: colors.ink,
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  reportKind: {
+    overflow: 'hidden',
+    borderRadius: 999,
+    backgroundColor: colors.paperDeep,
+    color: colors.muted,
+    fontSize: 11,
+    fontWeight: '800',
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 3,
+    textTransform: 'uppercase',
+  },
+  reportSubtext: {
+    color: colors.muted,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  reportPreview: {
+    minHeight: 78,
+    borderRadius: radius.sm,
+    backgroundColor: colors.paperDeep,
+    overflow: 'hidden',
+    justifyContent: 'center',
+  },
+  reportImage: {
+    width: '100%',
+    height: 132,
+  },
+  reportPreviewText: {
+    color: colors.ink,
+    fontSize: 14,
+    lineHeight: 20,
+    padding: spacing.md,
+  },
+  reportReasonBox: {
+    borderRadius: radius.sm,
+    backgroundColor: '#fff7f7',
+    padding: spacing.sm,
+    gap: 4,
+  },
+  reportReasonLabel: {
+    color: colors.rose,
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  reportReason: {
+    color: colors.ink,
+    fontSize: 14,
+    lineHeight: 19,
+  },
+  reportActionRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  keepMemoryButton: {
+    flex: 1,
+    minHeight: 42,
+    borderRadius: radius.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.white,
+    borderWidth: 1,
+    borderColor: colors.line,
+  },
+  keepMemoryText: {
+    color: colors.ink,
+    fontWeight: '800',
+  },
+  removeMemoryButton: {
+    flex: 1,
+    minHeight: 42,
+    borderRadius: radius.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#bd2f45',
+  },
+  removeMemoryText: {
+    color: colors.white,
     fontWeight: '800',
   },
   nicknameInput: {

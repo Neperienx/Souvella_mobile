@@ -6,7 +6,8 @@ export type MemoryKind = 'text' | 'photo' | 'voice';
 export type Memory = {
   id: string;
   circle_id: string;
-  author_id: string;
+  author_id: string | null;
+  author_name_snapshot: string | null;
   kind: MemoryKind;
   title: string;
   note: string | null;

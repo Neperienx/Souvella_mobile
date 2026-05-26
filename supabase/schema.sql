@@ -131,6 +131,7 @@ create table if not exists public.memories (
   id uuid primary key default gen_random_uuid(),
   circle_id uuid not null references public.circles(id) on delete cascade,
   author_id uuid not null references auth.users(id) on delete cascade,
+  author_name_snapshot text,
   kind text not null default 'text' check (kind in ('text', 'photo', 'voice')),
   title text not null,
   note text,
@@ -167,9 +168,40 @@ create table if not exists public.memory_reports (
   circle_id uuid not null references public.circles(id) on delete cascade,
   reporter_id uuid references auth.users(id) on delete set null,
   reason text,
+  status text not null default 'pending',
+  resolution text,
+  resolved_at timestamptz,
+  resolved_by uuid references auth.users(id) on delete set null,
   created_at timestamptz not null default now(),
   unique (memory_id, reporter_id)
 );
+
+alter table public.memory_reports add column if not exists status text not null default 'pending';
+alter table public.memory_reports add column if not exists resolution text;
+alter table public.memory_reports add column if not exists resolved_at timestamptz;
+alter table public.memory_reports add column if not exists resolved_by uuid references auth.users(id) on delete set null;
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'memory_reports_status_check'
+  ) then
+    alter table public.memory_reports
+    add constraint memory_reports_status_check check (status in ('pending', 'resolved'));
+  end if;
+
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'memory_reports_resolution_check'
+  ) then
+    alter table public.memory_reports
+    add constraint memory_reports_resolution_check check (resolution is null or resolution in ('kept', 'removed'));
+  end if;
+end;
+$$;
 
 create table if not exists public.circle_join_requests (
   id uuid primary key default gen_random_uuid(),
@@ -188,11 +220,26 @@ alter table public.memories add column if not exists content_mime_type text;
 alter table public.memories add column if not exists updated_at timestamptz not null default now();
 alter table public.memories add column if not exists deleted_at timestamptz;
 alter table public.memories add column if not exists deleted_by uuid references auth.users(id) on delete set null;
+alter table public.memories add column if not exists author_name_snapshot text;
+alter table public.memories alter column author_id drop not null;
+alter table public.memories drop constraint if exists memories_author_id_fkey;
+alter table public.memories
+add constraint memories_author_id_fkey
+foreign key (author_id) references auth.users(id) on delete set null;
+
+update public.memories
+set author_name_snapshot = coalesce(circle_members.nickname, profiles.default_username, 'Someone')
+from public.circle_members
+left join public.profiles on profiles.id = circle_members.user_id
+where public.memories.author_name_snapshot is null
+  and public.memories.circle_id = circle_members.circle_id
+  and public.memories.author_id = circle_members.user_id;
 
 insert into public.circle_members (circle_id, user_id, role)
 select distinct memories.circle_id, memories.author_id, 'member'
 from public.memories
 where memories.deleted_at is null
+  and memories.author_id is not null
   and not exists (
     select 1
     from public.circle_members
@@ -513,6 +560,7 @@ set search_path = public
 as $$
 declare
   new_memory public.memories;
+  author_name text;
 begin
   if auth.uid() is null then
     raise exception 'Must be logged in to upload a memory.';
@@ -542,9 +590,17 @@ begin
     raise exception 'You already uploaded a memory today.';
   end if;
 
+  select coalesce(circle_members.nickname, profiles.default_username, 'Someone')
+  into author_name
+  from public.circle_members
+  left join public.profiles on profiles.id = circle_members.user_id
+  where circle_members.circle_id = circle_id_input
+    and circle_members.user_id = auth.uid();
+
   insert into public.memories (
     circle_id,
     author_id,
+    author_name_snapshot,
     kind,
     title,
     note,
@@ -555,6 +611,7 @@ begin
   values (
     circle_id_input,
     auth.uid(),
+    coalesce(author_name, 'Someone'),
     kind_input,
     coalesce(nullif(trim(title_input), ''), 'Today''s memory'),
     nullif(trim(note_input), ''),
@@ -696,6 +753,29 @@ as $$
     and circle_join_requests.status = 'pending'
     and public.is_circle_admin(circle_id_input)
   order by circle_join_requests.created_at asc;
+$$;
+
+create or replace function public.get_my_pending_join_requests()
+returns table (
+  id uuid,
+  circle_id uuid,
+  circle_name text,
+  created_at timestamptz
+)
+language sql
+security definer
+set search_path = public
+as $$
+  select
+    circle_join_requests.id,
+    circle_join_requests.circle_id,
+    circles.name as circle_name,
+    circle_join_requests.created_at
+  from public.circle_join_requests
+  join public.circles on circles.id = circle_join_requests.circle_id
+  where circle_join_requests.requester_id = auth.uid()
+    and circle_join_requests.status = 'pending'
+  order by circle_join_requests.created_at desc;
 $$;
 
 create or replace function public.get_circle_like_state(
@@ -930,10 +1010,128 @@ begin
   values (memory_id_input, target_memory.circle_id, auth.uid(), nullif(trim(reason_input), ''))
   on conflict (memory_id, reporter_id) do update
   set reason = excluded.reason,
+      status = 'pending',
+      resolution = null,
+      resolved_at = null,
+      resolved_by = null,
       created_at = now()
   returning * into new_report;
 
   return new_report;
+end;
+$$;
+
+create or replace function public.get_circle_memory_reports(circle_id_input uuid)
+returns table (
+  report_id uuid,
+  memory_id uuid,
+  reporter_id uuid,
+  reporter_name text,
+  reason text,
+  reported_at timestamptz,
+  author_id uuid,
+  author_name text,
+  kind text,
+  title text,
+  note text,
+  content_base64 text,
+  content_mime_type text,
+  memory_date date,
+  created_at timestamptz
+)
+language sql
+security definer
+set search_path = public
+as $$
+  select
+    memory_reports.id as report_id,
+    memory_reports.memory_id,
+    memory_reports.reporter_id,
+    coalesce(reporter_members.nickname, reporter_profiles.default_username, 'Someone') as reporter_name,
+    memory_reports.reason,
+    memory_reports.created_at as reported_at,
+    memories.author_id,
+    coalesce(memories.author_name_snapshot, author_members.nickname, author_profiles.default_username, 'Someone') as author_name,
+    memories.kind,
+    memories.title,
+    memories.note,
+    memories.content_base64,
+    memories.content_mime_type,
+    memories.memory_date,
+    memories.created_at
+  from public.memory_reports
+  join public.memories on memories.id = memory_reports.memory_id
+  left join public.circle_members reporter_members
+    on reporter_members.circle_id = memory_reports.circle_id
+    and reporter_members.user_id = memory_reports.reporter_id
+  left join public.profiles reporter_profiles on reporter_profiles.id = memory_reports.reporter_id
+  left join public.circle_members author_members
+    on author_members.circle_id = memories.circle_id
+    and author_members.user_id = memories.author_id
+  left join public.profiles author_profiles on author_profiles.id = memories.author_id
+  where memory_reports.circle_id = circle_id_input
+    and memory_reports.status = 'pending'
+    and memories.deleted_at is null
+    and public.is_circle_admin(circle_id_input)
+  order by memory_reports.created_at asc;
+$$;
+
+create or replace function public.resolve_memory_report(
+  report_id_input uuid,
+  resolution_input text
+)
+returns public.memory_reports
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  target_report public.memory_reports;
+begin
+  if auth.uid() is null then
+    raise exception 'Must be logged in to resolve reports.';
+  end if;
+
+  if resolution_input not in ('kept', 'removed') then
+    raise exception 'Resolution must be kept or removed.';
+  end if;
+
+  select *
+  into target_report
+  from public.memory_reports
+  where id = report_id_input
+    and status = 'pending';
+
+  if target_report.id is null then
+    raise exception 'Report not found.';
+  end if;
+
+  if not public.is_circle_admin(target_report.circle_id) then
+    raise exception 'Only circle admins can resolve reports.';
+  end if;
+
+  if resolution_input = 'removed' then
+    update public.memories
+    set deleted_at = now(),
+        deleted_by = auth.uid()
+    where id = target_report.memory_id
+      and deleted_at is null;
+  end if;
+
+  update public.memory_reports
+  set status = 'resolved',
+      resolution = resolution_input,
+      resolved_at = now(),
+      resolved_by = auth.uid()
+  where memory_id = target_report.memory_id
+    and status = 'pending';
+
+  select *
+  into target_report
+  from public.memory_reports
+  where id = report_id_input;
+
+  return target_report;
 end;
 $$;
 
@@ -1078,19 +1276,32 @@ begin
     where circle_members.circle_id = target_circle.id
       and circle_members.user_id = auth.uid()
   ) then
-    return query select target_circle.id, target_circle.name, 'already_member'::text;
+    return query
+    select
+      target_circle.id as circle_id,
+      target_circle.name as circle_name,
+      'already_member'::text as status;
     return;
   end if;
 
-  insert into public.circle_join_requests (circle_id, requester_id, status)
-  values (target_circle.id, auth.uid(), 'pending')
-  on conflict (circle_id, requester_id) do update
+  update public.circle_join_requests
   set status = 'pending',
       decided_at = null,
       decided_by = null,
-      created_at = now();
+      created_at = now()
+  where public.circle_join_requests.circle_id = target_circle.id
+    and public.circle_join_requests.requester_id = auth.uid();
 
-  return query select target_circle.id, target_circle.name, 'pending'::text;
+  if not found then
+    insert into public.circle_join_requests (circle_id, requester_id, status)
+    values (target_circle.id, auth.uid(), 'pending');
+  end if;
+
+  return query
+  select
+    target_circle.id as circle_id,
+    target_circle.name as circle_name,
+    'pending'::text as status;
 end;
 $$;
 
@@ -1285,6 +1496,178 @@ begin
 end;
 $$;
 
+create or replace function public.transfer_circle_ownership(
+  circle_id_input uuid,
+  new_owner_id_input uuid
+)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  actor_role text;
+  target_role text;
+  actor_membership public.circle_members%rowtype;
+  target_membership public.circle_members%rowtype;
+begin
+  if auth.uid() is null then
+    raise exception 'Must be logged in to transfer ownership.';
+  end if;
+
+  if new_owner_id_input = auth.uid() then
+    raise exception 'Choose another member as the new owner.';
+  end if;
+
+  select * into actor_membership
+  from public.circle_members
+  where circle_id = circle_id_input
+    and user_id = auth.uid();
+
+  select * into target_membership
+  from public.circle_members
+  where circle_id = circle_id_input
+    and user_id = new_owner_id_input;
+
+  actor_role := actor_membership.role;
+  target_role := target_membership.role;
+
+  if actor_role <> 'owner' then
+    raise exception 'Only the circle owner can transfer ownership.';
+  end if;
+
+  if target_role is null then
+    raise exception 'New owner must be a member of this circle.';
+  end if;
+
+  delete from public.circle_members
+  where circle_id = circle_id_input
+    and user_id = new_owner_id_input;
+
+  update public.circle_members
+  set user_id = new_owner_id_input,
+      nickname = target_membership.nickname,
+      joined_at = target_membership.joined_at
+  where circle_id = circle_id_input
+    and user_id = auth.uid();
+
+  insert into public.circle_members (circle_id, user_id, role, nickname, joined_at)
+  values (
+    circle_id_input,
+    auth.uid(),
+    'admin',
+    actor_membership.nickname,
+    actor_membership.joined_at
+  );
+
+  return true;
+end;
+$$;
+
+create or replace function public.leave_circle(
+  circle_id_input uuid,
+  delete_memories_input boolean default false
+)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  actor_role text;
+  member_count int;
+begin
+  if auth.uid() is null then
+    raise exception 'Must be logged in to leave a circle.';
+  end if;
+
+  select role into actor_role
+  from public.circle_members
+  where circle_id = circle_id_input
+    and user_id = auth.uid();
+
+  if actor_role is null then
+    raise exception 'You are not a member of this circle.';
+  end if;
+
+  select count(*)::int into member_count
+  from public.circle_members
+  where circle_id = circle_id_input;
+
+  if actor_role = 'owner' and member_count > 1 then
+    raise exception 'Transfer ownership before leaving this circle.';
+  end if;
+
+  if actor_role = 'owner' and member_count = 1 then
+    raise exception 'Delete the circle instead of leaving it.';
+  end if;
+
+  if delete_memories_input then
+    update public.memories
+    set deleted_at = now(),
+        deleted_by = auth.uid()
+    where circle_id = circle_id_input
+      and author_id = auth.uid()
+      and deleted_at is null;
+  end if;
+
+  delete from public.circle_join_requests
+  where circle_id = circle_id_input
+    and requester_id = auth.uid();
+
+  delete from public.circle_members
+  where circle_id = circle_id_input
+    and user_id = auth.uid();
+
+  return true;
+end;
+$$;
+
+create or replace function public.delete_circle(
+  circle_id_input uuid,
+  confirm_name_input text
+)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  actor_role text;
+  target_circle public.circles;
+begin
+  if auth.uid() is null then
+    raise exception 'Must be logged in to delete a circle.';
+  end if;
+
+  select * into target_circle
+  from public.circles
+  where id = circle_id_input;
+
+  if target_circle.id is null then
+    raise exception 'Circle not found.';
+  end if;
+
+  select role into actor_role
+  from public.circle_members
+  where circle_id = circle_id_input
+    and user_id = auth.uid();
+
+  if actor_role <> 'owner' then
+    raise exception 'Only the circle owner can delete this circle.';
+  end if;
+
+  if trim(confirm_name_input) <> target_circle.name then
+    raise exception 'Circle name confirmation does not match.';
+  end if;
+
+  delete from public.circles
+  where id = circle_id_input;
+
+  return true;
+end;
+$$;
+
 revoke all on function public.create_memory_circle(text) from public;
 revoke all on function public.join_memory_circle(text) from public;
 revoke all on function public.is_circle_member(uuid) from public;
@@ -1295,11 +1678,14 @@ revoke all on function public.update_circle_nickname(uuid, text) from public;
 revoke all on function public.update_circle_profile(uuid, text, text, text) from public;
 revoke all on function public.get_circle_members(uuid) from public;
 revoke all on function public.get_circle_join_requests(uuid) from public;
+revoke all on function public.get_my_pending_join_requests() from public;
 revoke all on function public.get_circle_like_state(uuid, date) from public;
 revoke all on function public.like_memory(uuid, date) from public;
 revoke all on function public.add_memory_comment(uuid, text) from public;
 revoke all on function public.delete_memory(uuid) from public;
 revoke all on function public.report_memory(uuid, text) from public;
+revoke all on function public.get_circle_memory_reports(uuid) from public;
+revoke all on function public.resolve_memory_report(uuid, text) from public;
 revoke all on function public.delete_current_user() from public;
 revoke all on function public.get_memory_gems(uuid, int) from public;
 revoke all on function public.request_join_memory_circle(text) from public;
@@ -1307,6 +1693,9 @@ revoke all on function public.approve_join_request(uuid) from public;
 revoke all on function public.reject_join_request(uuid) from public;
 revoke all on function public.update_circle_member_role(uuid, uuid, text) from public;
 revoke all on function public.remove_circle_member(uuid, uuid) from public;
+revoke all on function public.transfer_circle_ownership(uuid, uuid) from public;
+revoke all on function public.leave_circle(uuid, boolean) from public;
+revoke all on function public.delete_circle(uuid, text) from public;
 
 grant execute on function public.create_memory_circle(text) to authenticated;
 grant execute on function public.join_memory_circle(text) to authenticated;
@@ -1318,11 +1707,14 @@ grant execute on function public.update_circle_nickname(uuid, text) to authentic
 grant execute on function public.update_circle_profile(uuid, text, text, text) to authenticated;
 grant execute on function public.get_circle_members(uuid) to authenticated;
 grant execute on function public.get_circle_join_requests(uuid) to authenticated;
+grant execute on function public.get_my_pending_join_requests() to authenticated;
 grant execute on function public.get_circle_like_state(uuid, date) to authenticated;
 grant execute on function public.like_memory(uuid, date) to authenticated;
 grant execute on function public.add_memory_comment(uuid, text) to authenticated;
 grant execute on function public.delete_memory(uuid) to authenticated;
 grant execute on function public.report_memory(uuid, text) to authenticated;
+grant execute on function public.get_circle_memory_reports(uuid) to authenticated;
+grant execute on function public.resolve_memory_report(uuid, text) to authenticated;
 grant execute on function public.delete_current_user() to authenticated;
 grant execute on function public.get_memory_gems(uuid, int) to authenticated;
 grant execute on function public.request_join_memory_circle(text) to authenticated;
@@ -1330,3 +1722,6 @@ grant execute on function public.approve_join_request(uuid) to authenticated;
 grant execute on function public.reject_join_request(uuid) to authenticated;
 grant execute on function public.update_circle_member_role(uuid, uuid, text) to authenticated;
 grant execute on function public.remove_circle_member(uuid, uuid) to authenticated;
+grant execute on function public.transfer_circle_ownership(uuid, uuid) to authenticated;
+grant execute on function public.leave_circle(uuid, boolean) to authenticated;
+grant execute on function public.delete_circle(uuid, text) to authenticated;

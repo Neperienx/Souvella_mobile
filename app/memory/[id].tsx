@@ -66,7 +66,11 @@ export default function MemoryDetailScreen() {
         setInteraction(cachedInteractions?.interactions[cachedMemory.id] ?? { likeCount: 0, commentCount: 0, likedByMe: false });
         setLikeState(cachedInteractions?.likeState ?? { likesLimit: 0, likesUsed: 0 });
         setComments((cachedInteractions?.comments ?? []).filter((comment) => comment.memory_id === cachedMemory.id));
-        setAuthorName(cachedInteractions?.memberNames[cachedMemory.author_id] ?? 'Someone');
+        setAuthorName(
+          cachedMemory.author_id
+            ? cachedInteractions?.memberNames[cachedMemory.author_id] ?? cachedMemory.author_name_snapshot ?? 'Someone'
+            : cachedMemory.author_name_snapshot ?? 'Someone',
+        );
         return;
       }
 
@@ -80,14 +84,18 @@ export default function MemoryDetailScreen() {
 
       setMemory(nextMemory);
 
-      const { data: membership } = await supabase
-        .from('circle_members')
-        .select('nickname')
-        .eq('circle_id', nextMemory.circle_id)
-        .eq('user_id', nextMemory.author_id)
-        .single();
+      if (nextMemory.author_id) {
+        const { data: membership } = await supabase
+          .from('circle_members')
+          .select('nickname')
+          .eq('circle_id', nextMemory.circle_id)
+          .eq('user_id', nextMemory.author_id)
+          .maybeSingle();
 
-      setAuthorName(membership?.nickname ?? 'Someone');
+        setAuthorName(membership?.nickname ?? nextMemory.author_name_snapshot ?? 'Someone');
+      } else {
+        setAuthorName(nextMemory.author_name_snapshot ?? 'Someone');
+      }
       await refreshInteractions(nextMemory);
     }
 
